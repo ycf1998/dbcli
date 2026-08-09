@@ -5,7 +5,6 @@ use mysql::{OptsBuilder, SslOpts};
 use std::time::Instant;
 
 mod config;
-mod parser;
 mod permission;
 
 use config::ConnectionConfig;
@@ -36,14 +35,6 @@ enum Command {
         /// 直接传入 SQL
         sql: Option<String>,
     },
-    /// 检查 SQL 语法和权限分类，不执行
-    DryRun {
-        /// 从文件读取 SQL
-        #[arg(short = 'f', long = "file")]
-        file: Option<String>,
-        /// 直接传入 SQL
-        sql: Option<String>,
-    },
     /// 列出配置文件中的所有可用连接
     Connections,
     /// 列出所有数据库
@@ -57,11 +48,22 @@ enum Command {
 fn load_sql(file: &Option<String>, sql: &Option<String>) -> Result<String> {
     match (file, sql) {
         (Some(_), Some(_)) => bail!("--file 和直接传入 SQL 不能同时使用"),
-        (None, None) => bail!("请提供 SQL 或 --file"),
+        (Some(path), None) if path == "-" => read_stdin(),
         (Some(path), None) => std::fs::read_to_string(path)
             .with_context(|| format!("无法读取文件: {path}")),
+        (None, Some(sql)) if sql == "-" => read_stdin(),
         (None, Some(sql)) => Ok(sql.clone()),
+        (None, None) => bail!("请提供 SQL 或 --file"),
     }
+}
+
+fn read_stdin() -> Result<String> {
+    use std::io::Read;
+    let mut buf = String::new();
+    std::io::stdin()
+        .read_to_string(&mut buf)
+        .with_context(|| "无法从 stdin 读取 SQL")?;
+    Ok(buf)
 }
 
 fn main() {
@@ -113,86 +115,29 @@ fn run() -> Result<()> {
     // 把快捷命令转成 SQL
     let sql = match &cmd {
         Command::Run { file, sql } => load_sql(file, sql)?,
-        Command::DryRun { file, sql } => load_sql(file, sql)?,
         Command::Tables => "SHOW TABLES".to_string(),
         Command::Schema { table } => format!("DESCRIBE `{table}`"),
         Command::Databases => "SHOW DATABASES".to_string(),
         Command::Connections => unreachable!(),
     };
 
-    // 逐条分析 SQL
-    #[derive(Debug, serde::Serialize)]
-    struct DryRunItem<'a> {
-        sql: &'a str,
-        valid: bool,
-        required: Option<String>,
-        allowed: bool,
-        reason: Option<String>,
-    }
-
-    let mut dry_items: Vec<DryRunItem> = Vec::new();
+    // 权限分类并检查
     let mut allowed_statements: Vec<(&str, Level)> = Vec::new();
-
     for stmt in permission::parse_statements(&sql) {
-        let stmt_sql = match &stmt {
-            Classification::Allowed { sql, .. } => sql,
-            Classification::Blocked { sql, .. } => sql,
-        };
-
-        // 语法检查
-        if let Err(e) = parser::validate(stmt_sql) {
-            dry_items.push(DryRunItem {
-                sql: stmt_sql,
-                valid: false,
-                required: None,
-                allowed: false,
-                reason: Some(format!("{e:#}")),
-            });
-            continue;
-        }
-
-        // 权限分类
         match stmt {
-            Classification::Blocked { sql: _, reason } => {
-                dry_items.push(DryRunItem {
-                    sql: stmt_sql,
-                    valid: true,
-                    required: Some("blocked".to_string()),
-                    allowed: false,
-                    reason: Some(reason.to_string()),
-                });
+            Classification::Blocked { sql, reason } => {
+                bail!("{reason}: [{}]", sql);
             }
-            Classification::Allowed { required, .. } => {
-                let allowed = required <= conn_cfg.level;
-                dry_items.push(DryRunItem {
-                    sql: stmt_sql,
-                    valid: true,
-                    required: Some(format!("{required:?}")),
-                    allowed,
-                    reason: if allowed {
-                        None
-                    } else {
-                        Some(format!("权限不足: 需要 {required:?} 级别，当前连接 '{}' 为 {:?}", conn_cfg.name, conn_cfg.level))
-                    },
-                });
-                if allowed {
-                    allowed_statements.push((stmt_sql, required));
+            Classification::Allowed { sql, required } => {
+                if required > conn_cfg.level {
+                    bail!(
+                        "权限不足: 需要 {required:?} 级别，当前连接 '{}' 为 {:?}: [{}]",
+                        conn_cfg.name,
+                        conn_cfg.level,
+                        sql
+                    );
                 }
-            }
-        }
-    }
-
-    // dry-run 只输出分类结果，不连接数据库
-    if matches!(cmd, Command::DryRun { .. }) {
-        println!("{}", serde_json::json!({"ok": true, "dry_run": true, "statements": dry_items}));
-        return Ok(());
-    }
-
-    // 执行模式：检查是否有不允许的语句
-    for item in &dry_items {
-        if !item.allowed {
-            if let Some(reason) = &item.reason {
-                bail!("{reason}: [{}]", item.sql);
+                allowed_statements.push((sql, required));
             }
         }
     }
@@ -206,7 +151,9 @@ fn run() -> Result<()> {
         .ip_or_hostname(Some(&conn_cfg.host))
         .tcp_port(conn_cfg.port)
         .user(Some(&conn_cfg.user))
-        .pass(Some(&conn_cfg.password));
+        .pass(Some(&conn_cfg.password))
+        .tcp_connect_timeout((conn_cfg.connect_timeout > 0).then(|| std::time::Duration::from_secs(conn_cfg.connect_timeout)))
+        .read_timeout((conn_cfg.query_timeout > 0).then(|| std::time::Duration::from_secs(conn_cfg.query_timeout)));
     if !matches!(cmd, Command::Databases) {
         opts_builder = opts_builder.db_name(conn_cfg.database.as_deref());
     }

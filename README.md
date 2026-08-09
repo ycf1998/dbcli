@@ -12,7 +12,7 @@ cargo build --release
 
 ## 配置
 
-在 `dbcli.toml` 同目录创建文件：
+在 `dbcli.exe` 同目录下创建 `dbcli.toml`：
 
 ```toml
 [[connections]]
@@ -25,6 +25,8 @@ database = "money_pos"
 level = "ddl"
 note = "本地开发库"
 max_rows = 10000      # SELECT 自动 LIMIT，0 表示不限制
+connect_timeout = 10  # 连接超时（秒），0 表示默认
+query_timeout = 30    # 查询超时（秒），0 表示默认
 ```
 
 **level 说明**
@@ -58,11 +60,11 @@ ssl_ca = "/path/to/ca.pem"
 # 执行 SQL
 ./dbcli local run "SELECT * FROM users WHERE id = 1"
 
-# 检查 SQL 语法和权限分类（不执行）
-./dbcli local dry-run "SELECT * FROM users; DROP DATABASE x"
-
 # 从文件执行 SQL
 ./dbcli local run --file query.sql
+
+# 从 stdin 执行 SQL
+echo "SELECT 1" | ./dbcli local run -
 
 # 多语句
 ./dbcli local run "SELECT 1; SELECT 2"

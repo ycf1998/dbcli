@@ -37,6 +37,12 @@ pub struct ConnectionConfig {
     /// SELECT 自动 LIMIT，0 表示不限制
     #[serde(default = "default_max_rows")]
     pub max_rows: u32,
+    /// 连接超时（秒），0 表示默认
+    #[serde(default)]
+    pub connect_timeout: u64,
+    /// 查询超时（秒），0 表示默认
+    #[serde(default)]
+    pub query_timeout: u64,
 }
 
 fn default_port() -> u16 {
