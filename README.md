@@ -58,7 +58,7 @@ ssl_ca = "/path/to/ca.pem"
 # 执行 SQL
 ./dbcli local run "SELECT * FROM users WHERE id = 1"
 
-# 检查 SQL 权限（不执行）
+# 检查 SQL 语法和权限分类（不执行）
 ./dbcli local dry-run "SELECT * FROM users; DROP DATABASE x"
 
 # 从文件执行 SQL

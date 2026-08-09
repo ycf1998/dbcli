@@ -36,7 +36,7 @@ enum Command {
         /// 直接传入 SQL
         sql: Option<String>,
     },
-    /// 只检查 SQL 权限分类，不执行
+    /// 检查 SQL 语法和权限分类，不执行
     DryRun {
         /// 从文件读取 SQL
         #[arg(short = 'f', long = "file")]
