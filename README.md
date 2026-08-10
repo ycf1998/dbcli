@@ -34,10 +34,12 @@ query_timeout = 30    # 查询超时（秒），0 表示默认
 | level | 允许 |
 |-------|------|
 | `readonly` | SELECT / SHOW / DESCRIBE / EXPLAIN / WITH |
-| `data` | 以上 + INSERT / UPDATE / DELETE / REPLACE |
-| `ddl` | 以上 + CREATE / ALTER / DROP / TRUNCATE / RENAME TABLE |
+| `data` | 以上 + INSERT / UPDATE / DELETE / REPLACE / CALL + 事务控制 |
+| `ddl` | 以上 + CREATE / ALTER / DROP / TRUNCATE / RENAME TABLE / VIEW / INDEX |
 
-`CREATE DATABASE`、`DROP DATABASE`、`GRANT`、`SHUTDOWN` 等管理操作一律禁止，不受 level 影响。
+事务控制语句（`BEGIN` / `START TRANSACTION` / `COMMIT` / `ROLLBACK`）需要 `data` 及以上级别。
+
+`CREATE DATABASE` / `DROP DATABASE` / `CREATE USER` / `GRANT` / `SHUTDOWN` 等管理操作一律禁止，不受 level 影响。
 
 **SSL 配置（可选）**
 
@@ -60,15 +62,22 @@ ssl_ca = "/path/to/ca.pem"
 # 执行 SQL
 ./dbcli local run "SELECT * FROM users WHERE id = 1"
 
-# 从文件执行 SQL
+# 从文件执行 SQL（支持多语句）
 ./dbcli local run --file query.sql
 
 # 从 stdin 执行 SQL
 echo "SELECT 1" | ./dbcli local run -
 
-# 多语句
+# 多语句（字符串、注释、反引号标识符内的分号不会误切）
 ./dbcli local run "SELECT 1; SELECT 2"
+
+# 事务
+./dbcli local run "BEGIN; INSERT INTO t VALUES(1); COMMIT"
 ```
+
+## 多语句与事务
+
+多语句会按顺序执行；任一语句失败时会自动执行 `ROLLBACK`，避免事务悬停。
 
 ## 输出格式
 

@@ -12,7 +12,11 @@ use config::Level;
 use permission::Classification;
 
 #[derive(Parser)]
-#[command(name = "dbcli", about = "MySQL CLI 工具")]
+#[command(
+    name = "dbcli",
+    about = "MySQL CLI 工具",
+    after_help = "Examples:\n  # 使用默认连接执行 SQL\n  dbcli run \"SELECT 1\"\n\n  # 指定连接执行 SQL\n  dbcli myconn run \"SELECT 1\"\n\n  # 执行文件中的 SQL\n  dbcli run -f script.sql\n\n  # 通过 stdin 执行 SQL\n  cat script.sql | dbcli run -f -\n\n  # 列出连接 / 数据库 / 表\n  dbcli connections\n  dbcli databases\n  dbcli tables\n\n  # 查看表结构\n  dbcli schema my_table"
+)]
 struct Cli {
     /// 显示版本号
     #[arg(short = 'v', long = "version")]
@@ -125,8 +129,8 @@ fn run() -> Result<()> {
     let mut allowed_statements: Vec<(&str, Level)> = Vec::new();
     for stmt in permission::parse_statements(&sql) {
         match stmt {
-            Classification::Blocked { sql, reason } => {
-                bail!("{reason}: [{}]", sql);
+            Classification::Blocked { sql } => {
+                bail!("不被允许的操作类型: [{}]", sql);
             }
             Classification::Allowed { sql, required } => {
                 if required > conn_cfg.level {
@@ -161,56 +165,64 @@ fn run() -> Result<()> {
 
     let mut conn = mysql::Conn::new(opts_builder).with_context(|| "连接 MySQL 失败")?;
 
-    // 执行所有语句
-    for (i, (sql, required)) in allowed_statements.iter().enumerate() {
-        let start = Instant::now();
-        let is_query = *required == Level::Readonly;
+    // 执行所有语句；失败时回滚，避免事务悬停
+    let exec = |conn: &mut mysql::Conn| -> Result<()> {
+        for (i, (sql, required)) in allowed_statements.iter().enumerate() {
+            let start = Instant::now();
+            let is_query = *required == Level::Readonly;
 
-        let (columns, rows, affected_rows) = if is_query {
-            let guarded = maybe_limit(sql, conn_cfg.max_rows);
-            let result: Vec<mysql::Row> = conn.query(&guarded).with_context(|| {
-                format!("第 {} 条语句执行失败", i + 1)
-            })?;
+            let (columns, rows, affected_rows) = if is_query {
+                let guarded = maybe_limit(sql, conn_cfg.max_rows);
+                let result: Vec<mysql::Row> = conn.query(&guarded).with_context(|| {
+                    format!("第 {} 条语句执行失败", i + 1)
+                })?;
 
-            let columns: Vec<String> = result
-                .first()
-                .map(|row| {
-                    row.columns_ref()
-                        .iter()
-                        .map(|c| c.name_str().to_string())
-                        .collect()
-                })
-                .unwrap_or_default();
+                let columns: Vec<String> = result
+                    .first()
+                    .map(|row| {
+                        row.columns_ref()
+                            .iter()
+                            .map(|c| c.name_str().to_string())
+                            .collect()
+                    })
+                    .unwrap_or_default();
 
-            let rows: Vec<Vec<serde_json::Value>> = result
-                .into_iter()
-                .map(|row| {
-                    (0..row.len())
-                        .map(|i| match row.get::<Option<String>, usize>(i) {
-                            Some(Some(v)) => serde_json::Value::String(v),
-                            _ => serde_json::Value::Null,
-                        })
-                        .collect()
-                })
-                .collect();
+                let rows: Vec<Vec<serde_json::Value>> = result
+                    .into_iter()
+                    .map(|row| {
+                        (0..row.len())
+                            .map(|i| match row.get::<Option<String>, usize>(i) {
+                                Some(Some(v)) => serde_json::Value::String(v),
+                                _ => serde_json::Value::Null,
+                            })
+                            .collect()
+                    })
+                    .collect();
 
-            (Some(columns), Some(rows), None)
-        } else {
-            conn.exec_drop(*sql, ()).with_context(|| {
-                format!("第 {} 条语句执行失败", i + 1)
-            })?;
-            (None, None, Some(conn.affected_rows()))
-        };
+                (Some(columns), Some(rows), None)
+            } else {
+                conn.exec_drop(*sql, ()).with_context(|| {
+                    format!("第 {} 条语句执行失败", i + 1)
+                })?;
+                (None, None, Some(conn.affected_rows()))
+            };
 
-        let duration_ms = start.elapsed().as_secs_f64() * 1000.0;
-        let output = serde_json::json!({
-            "ok": true,
-            "duration_ms": duration_ms,
-            "columns": columns,
-            "rows": rows,
-            "affected_rows": affected_rows,
-        });
-        println!("{output}");
+            let duration_ms = start.elapsed().as_secs_f64() * 1000.0;
+            let output = serde_json::json!({
+                "ok": true,
+                "duration_ms": duration_ms,
+                "columns": columns,
+                "rows": rows,
+                "affected_rows": affected_rows,
+            });
+            println!("{output}");
+        }
+        Ok(())
+    };
+
+    if let Err(e) = exec(&mut conn) {
+        let _ = conn.exec_drop("ROLLBACK", ());
+        return Err(e);
     }
 
     Ok(())
